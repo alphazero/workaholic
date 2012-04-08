@@ -189,7 +189,7 @@ _await_signal:
 	interrupt = <-controller
 
 _interrupted:
-//	w.fsmstat = Interrupted // REVU: this is wrong for various reasons.
+	//	w.fsmstat = Interrupted // REVU: this is wrong for various reasons.
 
 	switch interrupt {
 	case Work:
@@ -213,10 +213,10 @@ _work:
 		goto _interrupted
 	case task := <-commander:
 		w.perform(task)
-//		if taskInterrupt := w.perform(task); taskInterrupt == _zerovalue {
-//			interrupt = taskInterrupt
-//			goto _interrupted
-//		}
+		//		if taskInterrupt := w.perform(task); taskInterrupt == _zerovalue {
+		//			interrupt = taskInterrupt
+		//			goto _interrupted
+		//		}
 		goto _work
 	}
 
