@@ -26,7 +26,7 @@ func TestConstantValueAssumptions_status_code(t *testing.T) {
 		"StatusCodes[%d]=%d is not an acceptable noncritical status_code",
 	}
 	var stype int
-	for i, code := range StatusCodes {
+	for i, code := range Statuses {
 		acceptable := true
 		switch {
 		case i < criticalStats:

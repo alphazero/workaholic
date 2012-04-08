@@ -6,14 +6,10 @@
 package workaholic
 
 import (
-	"log" // TEMP
+//	"log" // TEMP
 )
 
-// ----------------------------------------------------------------------------
-// Tasks
-// ----------------------------------------------------------------------------
-
-// A Task is a function
+// A Task is a user provided function
 // REVU: review this (contexts, names instead of functions .. etc.)
 type Task func()
 
@@ -23,61 +19,107 @@ type Fault struct {
 	fault interface{}
 }
 
-type control_code int8
+type interrupt_code int8
 
 const (
-	_ control_code = iota // Note: fsm depends on 0 here.
+	_zerovalue interrupt_code = iota // SPEC: must be 0
+
+	// interrupt code issued to worker to initiate,
+	// or to resume, work if previously paused or faulted.
 	Work
+
+	// interrupt code issued to worker to commend working
 	Pause
+
+	// interrupt code issued to worker to stop working
+	// Worker's can resume work subsequently via interrupt Work.
 	Report
+
+	// interrupt code issued to worker to quit (terminate).
 	Quit
 )
 
-/* used by tests */
-var Interrupts = [...]control_code{Work, Pause, Report, Quit}
+// Mainly used by tests and a pseudo enum for the end user
+var Interrupts = [...]interrupt_code{Work, Pause, Report, Quit}
 
-/* used by tests */
-
-type Status_code int8
+type status_code int8
 
 const (
-	_ Status_code = iota - 3
-	faulted
-	interrupted
-	idle
-	busy
-	terminated
+	_ status_code = iota - 3
+
+	// A status code.
+	// Faulted indicates that the worker (itself) has faulted
+	// and has stopped working. A worker can attempt to recover
+	// from Faulted state if given interrupt to Work.
+	Faulted
+
+	// A status code.
+	// Interrupted indicated that the worker was interrupted while
+	// performing a task.  (Not yet supported)
+
+	Interrupted
+	// A status code.
+	// Idle indicates that the worker is ready and able to work.
+	// In this state, worker will respond to Work, Report, and Quit.
+	Idle
+
+	// A status code.
+	// Busy indicates the worker is busy doing work.
+	// Worker will respond to Pause, Report and Quit.
+	// REVU: broken -- task is not interruptible.
+	Busy
+
+	// A status code.
+	// Terminated indicates that the worker has entered a terminal
+	// state.  Provided channels to worker are closed at this point.
+	Terminated
 )
 
-func (s Status_code) String() string {
+// Mainly used by tests and a pseudo enum for the end user
+var Statuses = [...]status_code{Faulted, Interrupted, Idle, Busy, Terminated}
+
+// Pretty print for status codes
+func (s status_code) String() string {
 	switch s {
-	case faulted:
-		return "faulted"
-	case interrupted:
-		return "interrupted"
+	case Faulted:
+		return "Faulted"
+	case Interrupted:
+		return "Interrupted"
+	case Idle:
+		return "Idle"
+	case Busy:
+		return "Busy"
+	case Terminated:
+		return "Terminated"
 	}
 	return "not-coded"
 }
 
 /* used by tests */
 var criticalStats = 2
-var StatusCodes = [...]Status_code{faulted, interrupted, idle, busy}
 
 /* used by tests */
 
-// Status_code channels convey Status_code (signals) from worker to clients.
+// status_code channels convey status_code (signals) from worker to clients.
 // define general, write only, and, real-only types
 
-//type statusCh chan Status_code
-type statusOut chan<- Status_code
+//type statusCh chan status_code
+type statusOut chan<- status_code
 
 // ----------------------------------------------------------------------------
 // Worker
 // ----------------------------------------------------------------------------
 
+// Command is a bounded send-only channel of Task
 type Command chan<- Task
-type Control chan<- control_code
-type Status <-chan Status_code
+
+// Control is a bounded send-only channel of interrupt_code
+type Control chan<- interrupt_code
+
+// Status is a bounded receive-only channel of status_code
+type Status <-chan status_code
+
+// Faults is a bounded receive-only channel of Fault
 type Faults <-chan Fault
 
 // worker struct is a handle for a worker
@@ -91,28 +133,25 @@ type Worker struct {
 	/* internals */
 
 	commandCh chan Task
-	statusCh  chan Status_code
-	controlCh chan control_code
+	statusCh  chan status_code
+	controlCh chan interrupt_code
 	faultsCh  chan Fault
-	fsmstat   Status_code
+	fsmstat   status_code
 
-	/* ui */
+	/* Worker interface for use by Worker's client */
 
-	// Command is a buffered channel of Task
-	// used to issue work for worker
-	Command Command
+	// Channel for issuing Task(s) to the Worker
+	Command
 
-	// Control is a len 1 write only channel of control_code
-	// used to issue interrupts to the worker
-	Control Control
+	// Channel for issuing interrupts to the Worker
+	Control
 
-	// Status is a len 1 read only channel of Status_code
+	// Status is a len 1 read only channel of status_code
 	// used by worker to send status in response to Report requests
-	Status Status
+	Status
 
-	// Status is a len 1 read only channel of Status_code
 	// used by worker to send status to user
-	Faults Faults
+	Faults
 }
 
 func NewWorker(name string, id int, qlen int) *Worker {
@@ -121,11 +160,11 @@ func NewWorker(name string, id int, qlen int) *Worker {
 	w.commandCh = make(chan Task, qlen)
 	w.Command = (chan<- Task)(w.commandCh)
 
-	w.controlCh = make(chan control_code, 1)
-	w.Control = (chan<- control_code)(w.controlCh)
+	w.controlCh = make(chan interrupt_code, 1)
+	w.Control = (chan<- interrupt_code)(w.controlCh)
 
-	w.statusCh = make(chan Status_code, 1) // REVU: the 1 bothers me .. a bit
-	w.Status = (<-chan Status_code)(w.statusCh)
+	w.statusCh = make(chan status_code, 1) // REVU: the 1 bothers me .. a bit
+	w.Status = (<-chan status_code)(w.statusCh)
 
 	w.faultsCh = make(chan Fault, qlen) // REVU: hate these qlen knobs
 	w.Faults = (<-chan Fault)(w.faultsCh)
@@ -137,62 +176,69 @@ func NewWorker(name string, id int, qlen int) *Worker {
 
 func (w *Worker) fsm() {
 
-	var controller = (<-chan control_code)(w.controlCh)
+	var controller = (<-chan interrupt_code)(w.controlCh)
 	var commander = (<-chan Task)(w.commandCh)
-	var statout = (chan<- Status_code)(w.statusCh)
-	//    var faultsout = (chan<- Fault)(w.faultsCh)
+	var statout = (chan<- status_code)(w.statusCh)
 
-	w.fsmstat = idle // in this state only at startup and after a Pause command
+	var interrupt, lastinterrupt interrupt_code
 
-await_signal:
-	interrupt := <-controller
+	w.fsmstat = Idle // in this state only at startup and after a Pause command
 
-interrupted:
-	w.fsmstat = interrupted
+_await_signal:
+	lastinterrupt = interrupt
+	interrupt = <-controller
+
+_interrupted:
+//	w.fsmstat = Interrupted // REVU: this is wrong for various reasons.
 
 	switch interrupt {
 	case Work:
-		goto Work
+		goto _work
 	case Pause:
-		goto Pause
+		goto _pause
 	case Report:
-		goto Report
+		goto _report
 	case Quit:
-		goto shutdown
+		goto _shutdown
+	default:
+		goto _await_signal
 	}
 	panic("SHOULD NOT BE REACHED")
 
-Work:
-	w.fsmstat = busy
-
+_work:
+	w.fsmstat = Busy
+	lastinterrupt = interrupt
 	select {
 	case interrupt = <-controller:
-		goto interrupted
+		goto _interrupted
 	case task := <-commander:
 		w.perform(task)
-		goto Work
+//		if taskInterrupt := w.perform(task); taskInterrupt == _zerovalue {
+//			interrupt = taskInterrupt
+//			goto _interrupted
+//		}
+		goto _work
 	}
 
-Pause:
-	w.fsmstat = idle
+_pause:
+	w.fsmstat = Idle
 
-	goto await_signal
+	goto _await_signal
 
-Report:
-	// TODO: do the Report
-	// REVU: do we even need this?
-	goto await_signal
+_report:
+	statout <- w.fsmstat
+	interrupt = lastinterrupt
+	goto _interrupted
 
-	//faulted:
+	//Faulted:
 	////	w.statusCh <- workerStatus{id, fault, taskstatus, &controller}
-	//	w.statusCh <- faulted
-	//	goto await_signal
+	//	w.statusCh <- Faulted
+	//	goto _await_signal
 
-shutdown:
-	w.fsmstat = terminated
+_shutdown:
+	w.fsmstat = Terminated
 
-	statout <- terminated
-	log.Println("shutdown ..")
+	statout <- w.fsmstat
 	// TODO: add shutdown hook for worker
 }
 
@@ -200,7 +246,7 @@ func (w *Worker) perform(task Task) {
 	defer func() {
 		if p := recover(); p != nil {
 			w.faultsCh <- Fault{task, p}
-			//			w.statusCh <- faulted
+			//			w.statusCh <- Faulted
 		}
 	}()
 
