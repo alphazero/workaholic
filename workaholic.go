@@ -17,7 +17,14 @@ import (
 // REVU: review this (contexts, names instead of functions .. etc.)
 type Task func()
 
+// Task fault in case of panic
+type Fault struct {
+	task  Task
+	fault interface{}
+}
+
 type control_code int8
+
 const (
 	_ control_code = iota // Note: fsm depends on 0 here.
 	Work
@@ -25,12 +32,14 @@ const (
 	Report
 	Quit
 )
-/* used by tests */
-var Interrupts = [...]control_code { Work, Pause, Report, Quit}
-/* used by tests */
 
+/* used by tests */
+var Interrupts = [...]control_code{Work, Pause, Report, Quit}
+
+/* used by tests */
 
 type Status_code int8
+
 const (
 	_ Status_code = iota - 3
 	faulted
@@ -39,6 +48,7 @@ const (
 	busy
 	terminated
 )
+
 func (s Status_code) String() string {
 	switch s {
 	case faulted:
@@ -48,9 +58,11 @@ func (s Status_code) String() string {
 	}
 	return "not-coded"
 }
+
 /* used by tests */
 var criticalStats = 2
-var StatusCodes = [...]Status_code {faulted, interrupted, idle, busy}
+var StatusCodes = [...]Status_code{faulted, interrupted, idle, busy}
+
 /* used by tests */
 
 // Status_code channels convey Status_code (signals) from worker to clients.
@@ -66,22 +78,23 @@ type statusOut chan<- Status_code
 type Command chan<- Task
 type Control chan<- control_code
 type Status <-chan Status_code
-type Faults <-chan interface{}
+type Faults <-chan Fault
 
 // worker struct is a handle for a worker
 type Worker struct {
 
 	/* identity */
 
-	Id        int
-	Name      string
+	Id   int
+	Name string
 
 	/* internals */
 
 	commandCh chan Task
 	statusCh  chan Status_code
 	controlCh chan control_code
-	fsmstat Status_code
+	faultsCh  chan Fault
+	fsmstat   Status_code
 
 	/* ui */
 
@@ -94,8 +107,12 @@ type Worker struct {
 	Control Control
 
 	// Status is a len 1 read only channel of Status_code
+	// used by worker to send status in response to Report requests
+	Status Status
+
+	// Status is a len 1 read only channel of Status_code
 	// used by worker to send status to user
-	Status  Status
+	Faults Faults
 }
 
 func NewWorker(name string, id int, qlen int) *Worker {
@@ -107,19 +124,23 @@ func NewWorker(name string, id int, qlen int) *Worker {
 	w.controlCh = make(chan control_code, 1)
 	w.Control = (chan<- control_code)(w.controlCh)
 
-	w.statusCh = make(chan Status_code, 1)         // REVU: the 1 bothers me .. a bit
+	w.statusCh = make(chan Status_code, 1) // REVU: the 1 bothers me .. a bit
 	w.Status = (<-chan Status_code)(w.statusCh)
+
+	w.faultsCh = make(chan Fault, qlen) // REVU: hate these qlen knobs
+	w.Faults = (<-chan Fault)(w.faultsCh)
 
 	go w.fsm()
 
 	return w
 }
 
-func (w *Worker) fsm()  {
+func (w *Worker) fsm() {
 
 	var controller = (<-chan control_code)(w.controlCh)
 	var commander = (<-chan Task)(w.commandCh)
-    var statout = (chan<- Status_code)(w.statusCh)
+	var statout = (chan<- Status_code)(w.statusCh)
+	//    var faultsout = (chan<- Fault)(w.faultsCh)
 
 	w.fsmstat = idle // in this state only at startup and after a Pause command
 
@@ -139,7 +160,7 @@ interrupted:
 	case Quit:
 		goto shutdown
 	}
-panic("SHOULD NOT BE REACHED")
+	panic("SHOULD NOT BE REACHED")
 
 Work:
 	w.fsmstat = busy
@@ -162,15 +183,15 @@ Report:
 	// REVU: do we even need this?
 	goto await_signal
 
-//faulted:
-////	w.statusCh <- workerStatus{id, fault, taskstatus, &controller}
-//	w.statusCh <- faulted
-//	goto await_signal
+	//faulted:
+	////	w.statusCh <- workerStatus{id, fault, taskstatus, &controller}
+	//	w.statusCh <- faulted
+	//	goto await_signal
 
 shutdown:
 	w.fsmstat = terminated
 
-	statout<- terminated
+	statout <- terminated
 	log.Println("shutdown ..")
 	// TODO: add shutdown hook for worker
 }
@@ -178,9 +199,8 @@ shutdown:
 func (w *Worker) perform(task Task) {
 	defer func() {
 		if p := recover(); p != nil {
-		// REVU: get rid of status and use faults
-//			w.faultsCh <- p
-			w.statusCh <- faulted
+			w.faultsCh <- Fault{task, p}
+			//			w.statusCh <- faulted
 		}
 	}()
 
